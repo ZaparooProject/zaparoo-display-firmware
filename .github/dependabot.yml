@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Zaparoo Project Contributors.
+
+# Workflow actions are pinned by commit SHA, so they only move when Dependabot
+# opens a pull request for them. The same applies to the host tools' Python
+# dependencies; the firmware's own dependency is ESP-IDF, which is pinned by
+# version in the build workflow rather than by a manifest.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/tools"
+    schedule:
+      interval: "weekly"

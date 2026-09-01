@@ -1,0 +1,22 @@
+# Project defaults for Zaparoo Display Firmware.
+# Primary target: Waveshare ESP32-S3-LCD-Driver-Board (ESP32-S3-WROOM-1-N8R8).
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Waveshare board uses an ESP32-S3-WROOM-1-N8R8 module: 8MB flash + 8MB OPI PSRAM.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# Dual OTA application slots. Reserved up front because changing the partition
+# layout after devices ship means a full serial re-flash for every user.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# The zapdisplay protocol loop runs on the main task and handles asset uploads,
+# so the default 3.5KB stack leaves very little headroom.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

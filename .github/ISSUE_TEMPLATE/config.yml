@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Zaparoo Project Contributors.
+
+blank_issues_enabled: false
+contact_links:
+  - name: Zaparoo documentation
+    url: https://zaparoo.org/docs/
+    about: Setup and usage guides for Zaparoo, including Core and ZapScript.

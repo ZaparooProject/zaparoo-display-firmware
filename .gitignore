@@ -1,0 +1,30 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# Dependency manager output
+# Commit dependencies.lock once real managed dependencies are added.
+dependencies.lock
+
+# Local/tool/editor state
+# AGENTS.md is the checked-in source. Symlink it locally for agents that look
+# for CLAUDE.md instead:  ln -s AGENTS.md CLAUDE.md
+CLAUDE.md
+.pi/
+eim_config.toml
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Host test binaries
+tests/render/render_test
+
+# Logs and temporary files
+*.log
+*.tmp
+__pycache__/
+*.pyc

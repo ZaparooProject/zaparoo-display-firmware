@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Zaparoo Project Contributors.
+
+name: Feature request
+description: Something the display should do that it does not
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The situation, rather than the solution you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - What is shown on screen
+        - Wire protocol
+        - Panel behaviour (brightness, blanking, retention)
+        - Input and bindings
+        - Host tools
+        - Zaparoo Core integration
+        - New board or panel
+    validations:
+      required: true

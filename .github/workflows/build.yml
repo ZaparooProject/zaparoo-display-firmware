@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Zaparoo Project Contributors.
+
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    name: ESP-IDF build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Build firmware
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v6.0.1
+          target: esp32s3
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zaparoo-display-firmware
+          path: |
+            build/zaparoo_display_firmware.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/flash_args
+          if-no-files-found: error

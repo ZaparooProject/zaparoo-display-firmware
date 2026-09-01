@@ -1,0 +1,12 @@
+# Default owners for everything in this repository.
+* @ZaparooProject/admins
+
+# The wire protocol is a compatibility contract: Zaparoo Core, the reference
+# host tools and any third-party host all parse it. Changes here can break
+# devices in the field that cannot be updated in step.
+/docs/protocol.md @ZaparooProject/admins
+/main/protocol/ @ZaparooProject/admins
+
+# Trademark-bearing artwork and the notices that govern it.
+/tools/assets/ @ZaparooProject/admins
+/NOTICE.md @ZaparooProject/admins

@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Zaparoo Project Contributors.
+
+name: Bug report
+description: Something the firmware or host tools do wrong
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what the device did instead.
+    validations:
+      required: true
+  - type: input
+    id: firmware-version
+    attributes:
+      label: Firmware version
+      description: The `fw=` field from `INFO`, or the release you flashed.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: board
+    attributes:
+      label: Board and panel
+      placeholder: "Waveshare ESP32-S3-LCD-Driver-Board with HD458002C40"
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: What was driving the display
+      options:
+        - Zaparoo Core
+        - tools/zapdisplay_live_daemon.py
+        - tools/zapdisplay_demo.py
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: state
+    attributes:
+      label: Device state
+      description: >
+        Output of the `STATE` and `SETTINGS` commands if you can get them. They
+        report what the device is actually doing, which is often different from
+        what it was told.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Serial output
+      description: Anything from `idf.py monitor` or the host tool's `--verbose` output.
+      render: text

@@ -1,0 +1,10 @@
+# Matches the existing firmware style: 4-space indent, 120 column limit.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+BreakBeforeBraces: Linux
+PointerAlignment: Right
+SortIncludes: false

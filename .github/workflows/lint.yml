@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Zaparoo Project Contributors.
+
+name: Lint and test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware-format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Check firmware formatting
+        run: |
+          # Generated font and logo data is machine-written and intentionally
+          # not formatted.
+          find main tests -name '*.c' -o -name '*.h' \
+            | grep -v 'generated_' \
+            | xargs clang-format --dry-run --Werror
+
+  workflows:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # Actions are pinned by commit SHA and updated by Dependabot, so the
+      # workflows change without a human reading them closely.
+      - name: Lint workflows
+        uses: raven-actions/actionlint@3a24062651993d40fed1019b58ac6fbdfbf276cc # v2.0.1
+
+  render:
+    name: Scene rendering tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # Scenes are pure functions of the display state, so the real canvas and
+      # scene code builds for the host and its layout can be checked in pixels
+      # without ESP-IDF or a panel.
+      - name: Run scene rendering tests
+        run: make -C tests/render test
+
+  tools:
+    name: Host tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r tools/requirements-dev.txt
+
+      - name: Lint
+        run: ruff check tools
+
+      - name: Format check
+        run: ruff format --check tools
+
+      - name: Test
+        run: python -m pytest tools/tests -q
