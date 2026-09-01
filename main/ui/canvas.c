@@ -3,6 +3,7 @@
 
 #include "ui/canvas.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #define ZD_ELLIPSIS_CODEPOINT 0x2026
@@ -18,31 +19,119 @@ void zd_canvas_fill_active(zd_canvas_t *canvas, uint16_t color)
 
 static uint16_t zd_blend_rgb565(uint16_t dst, uint16_t src, uint8_t alpha);
 
-static void zd_canvas_set_pixel(zd_canvas_t *canvas, int x, int y, uint16_t color)
+// map_pixel resolves a logical coordinate to a framebuffer index, or returns
+// false when it falls outside the visible area. Every write and every read goes
+// through here, which is what keeps the orientation out of the scene code.
+//
+// The logical UI is rotated a quarter turn clockwise onto the portrait panel;
+// rotation 180 composes a half turn on top of that. Substituting the half turn
+// into the quarter turn collapses to a swap of which axis is reversed, so
+// neither case is more expensive than the other.
+static void map_coord(const zd_canvas_t *canvas, int x, int y, int *out_x, int *out_y)
 {
-    // Logical UI is rotated 90 degrees clockwise onto the portrait panel.
-    const int physical_x = (int)canvas->visible_width - 1 - y;
-    const int physical_y = x;
+    if (canvas->rotation == 180) {
+        *out_x = y;
+        *out_y = (int)canvas->visible_height - 1 - x;
+        return;
+    }
+    *out_x = (int)canvas->visible_width - 1 - y;
+    *out_y = x;
+}
+
+static bool map_pixel(const zd_canvas_t *canvas, int x, int y, size_t *out_index)
+{
+    int physical_x;
+    int physical_y;
+
+    map_coord(canvas, x, y, &physical_x, &physical_y);
 
     if (physical_x < 0 || physical_x >= canvas->visible_width || physical_y < 0 ||
         physical_y >= canvas->visible_height) {
-        return;
+        return false;
     }
 
-    canvas->pixels[(size_t)physical_y * canvas->active_width + canvas->overscan_left + physical_x] = color;
+    *out_index = (size_t)physical_y * canvas->active_width + canvas->overscan_left + physical_x;
+    return true;
+}
+
+bool zd_canvas_physical_rect(const zd_canvas_t *canvas, zd_rect_t logical, zd_rect_t *out_physical)
+{
+    if (logical.width <= 0 || logical.height <= 0) {
+        return false;
+    }
+
+    // Clip in logical space. The mapping is a rigid transform, so clipping
+    // afterwards would mean working out which logical edge each physical one
+    // came from.
+    const int x0 = logical.x < 0 ? 0 : logical.x;
+    const int y0 = logical.y < 0 ? 0 : logical.y;
+    int x1 = logical.x + logical.width;
+    int y1 = logical.y + logical.height;
+
+    if (x1 > canvas->logical_width) {
+        x1 = canvas->logical_width;
+    }
+    if (y1 > canvas->logical_height) {
+        y1 = canvas->logical_height;
+    }
+    if (x0 >= x1 || y0 >= y1) {
+        return false;
+    }
+
+    // Which corner lands where depends on the rotation, so take the extremes of
+    // all four rather than restating the transform per orientation.
+    const int corner_x[2] = {x0, x1 - 1};
+    const int corner_y[2] = {y0, y1 - 1};
+    int min_x = 0;
+    int min_y = 0;
+    int max_x = 0;
+    int max_y = 0;
+
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            int px;
+            int py;
+
+            map_coord(canvas, corner_x[i], corner_y[j], &px, &py);
+            if (i == 0 && j == 0) {
+                min_x = max_x = px;
+                min_y = max_y = py;
+                continue;
+            }
+            if (px < min_x)
+                min_x = px;
+            if (px > max_x)
+                max_x = px;
+            if (py < min_y)
+                min_y = py;
+            if (py > max_y)
+                max_y = py;
+        }
+    }
+
+    *out_physical = (zd_rect_t){
+        .x = canvas->overscan_left + min_x,
+        .y = min_y,
+        .width = max_x - min_x + 1,
+        .height = max_y - min_y + 1,
+    };
+    return true;
+}
+
+static void zd_canvas_set_pixel(zd_canvas_t *canvas, int x, int y, uint16_t color)
+{
+    size_t index;
+
+    if (map_pixel(canvas, x, y, &index)) {
+        canvas->pixels[index] = color;
+    }
 }
 
 static uint16_t zd_canvas_get_pixel(const zd_canvas_t *canvas, int x, int y)
 {
-    const int physical_x = (int)canvas->visible_width - 1 - y;
-    const int physical_y = x;
+    size_t index;
 
-    if (physical_x < 0 || physical_x >= canvas->visible_width || physical_y < 0 ||
-        physical_y >= canvas->visible_height) {
-        return 0x0000;
-    }
-
-    return canvas->pixels[(size_t)physical_y * canvas->active_width + canvas->overscan_left + physical_x];
+    return map_pixel(canvas, x, y, &index) ? canvas->pixels[index] : 0x0000;
 }
 
 // blend_pixel is the common read-modify-write for antialiased coverage.
@@ -79,14 +168,25 @@ void zd_canvas_fill_rect(zd_canvas_t *canvas, int x, int y, int width, int heigh
         return;
     }
 
-    // After the 90 degree rotation the framebuffer index is
-    // x * active_width + overscan_left + (visible_width - 1 - y), so logical y
-    // is the contiguous axis. Walking columns outermost keeps the PSRAM writes
-    // sequential instead of striding by a whole row per pixel.
+    // Logical y is the contiguous framebuffer axis in both orientations: at
+    // rotation 0 the index is x * active_width + overscan_left +
+    // (visible_width - 1 - y), and at 180 it is (visible_height - 1 - x) *
+    // active_width + overscan_left + y. Walking columns outermost keeps the
+    // PSRAM writes sequential instead of striding by a whole row per pixel;
+    // only which way the inner walk runs changes, so the branch is hoisted out
+    // of the loop rather than repeated per pixel. This duplicates map_pixel on
+    // purpose -- a rotation change has to be made in both places.
+    const bool flipped = canvas->rotation == 180;
+    const int step = flipped ? 1 : -1;
+
     for (int col = x0; col < x1; ++col) {
-        uint16_t *row = canvas->pixels + (size_t)col * canvas->active_width + canvas->overscan_left;
-        for (int line = y0; line < y1; ++line) {
-            row[canvas->visible_width - 1 - line] = color;
+        const int physical_y = flipped ? (int)canvas->visible_height - 1 - col : col;
+        const int physical_x = flipped ? y0 : canvas->visible_width - 1 - y0;
+        uint16_t *pixel =
+            canvas->pixels + (size_t)physical_y * canvas->active_width + canvas->overscan_left + physical_x;
+
+        for (int line = y0; line < y1; ++line, pixel += step) {
+            *pixel = color;
         }
     }
 }
@@ -448,12 +548,13 @@ void zd_canvas_blit_alpha_mask(zd_canvas_t *canvas, int x, int y, const uint8_t 
 
 // -- Widgets ----------------------------------------------------------------
 
-void zd_canvas_draw_progress_track(zd_canvas_t *canvas, int x, int y, int cells, int filled, int cell_width,
-                                   int cell_height, int gap, int radius, uint16_t on_color, uint16_t off_color)
+void zd_canvas_draw_progress_track(zd_canvas_t *canvas, int x, int y, int cells, int first_on, int on_count,
+                                   int cell_width, int cell_height, int gap, int radius, uint16_t on_color,
+                                   uint16_t off_color)
 {
     for (int cell = 0; cell < cells; ++cell) {
         const int cell_x = x + cell * (cell_width + gap);
-        zd_canvas_fill_round_rect(canvas, cell_x, y, cell_width, cell_height, radius,
-                                  cell < filled ? on_color : off_color);
+        const bool on = cell >= first_on && cell < first_on + on_count;
+        zd_canvas_fill_round_rect(canvas, cell_x, y, cell_width, cell_height, radius, on ? on_color : off_color);
     }
 }

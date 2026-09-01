@@ -64,6 +64,13 @@ static zapdisplay_state_t s_shown_state;
 static bool s_has_shown;
 static asset_upload_t s_asset;
 static cover_slot_t s_cover;
+
+// What was last actually played, kept beside the cover slot for the same reason
+// the slot exists: it outlives the pending state a host resets with CLEAR.
+// Idle draws from this, so the caption stays with the picture instead of the
+// device holding artwork it can no longer name.
+static char s_last_title[64];
+static char s_last_system[48];
 static bool s_quiet_mode;
 // Device-to-host event lines are off until a host asks for them. Every existing
 // host parses responses by prefix and treats any unexpected line as noise, so
@@ -446,6 +453,49 @@ static void handle_asset_begin(const char *args)
     fflush(stdout);
 }
 
+// render_launch_band repaints the launching scene's progress track in place.
+//
+// It works from the frame that is on the panel, not from the state the host is
+// assembling. Those differ for as long as a launch takes: a host puts the
+// launching frame up, then CLEARs the pending state and spends seconds
+// uploading artwork before it shows anything again. Core does exactly that, so
+// keying this off the pending scene froze the bar for the length of every
+// upload -- the one stretch it exists to cover.
+static void render_launch_band(void)
+{
+    if (!s_has_shown || s_shown_state.scene != ZAPDISPLAY_SCENE_LAUNCHING) {
+        return;
+    }
+
+    // s_shown_state is a content snapshot, so it carries everything the
+    // launching scene draws -- system, title, status, accent -- but not the
+    // phase, which is derived rather than shown.
+    zapdisplay_state_t frame = s_shown_state;
+
+    frame.progress_phase = zd_tick_progress_phase();
+    zd_hd458002c40_render_progress(&frame);
+}
+
+// step_launch_animation keeps the track moving while an upload is in flight.
+// The loop sits inside framed payload windows for the length of a transfer and
+// the tick never runs there, so a bar that only stepped from service_tick would
+// freeze for exactly the seconds someone is watching it.
+//
+// Called only once a chunk has been answered, while the host is preparing the
+// next one. It deliberately does not go through service_tick: that polls input
+// and flushes events, and an event line emitted inside a payload window would
+// be read by the host as data.
+//
+// This has to stay cheap or it turns into a tax on every upload. Repainting the
+// whole frame here measured at 540 ms a step, which took a 227 KB cover from
+// 4.8 s to 8.6 s; the band is under 5000 pixels.
+static void step_launch_animation(void)
+{
+    if (zd_tick_progress_step()) {
+        render_launch_band();
+    }
+}
+
 static bool append_asset_chunk(uint32_t index, const char *encoded, size_t encoded_length)
 {
     static uint8_t decoded[768];
@@ -497,6 +547,7 @@ static void handle_asset_chunk(const char *args)
     if (append_asset_chunk(index, payload, strlen(payload))) {
         printf("OK ASSET_CHUNK %lu\n", (unsigned long)index);
         fflush(stdout);
+        step_launch_animation();
     }
 }
 
@@ -530,6 +581,7 @@ static void handle_asset_chunk_data(const char *args)
     if (append_asset_chunk(index, encoded, encoded_length)) {
         printf("OK ASSET_CHUNK %lu\n", (unsigned long)index);
         fflush(stdout);
+        step_launch_animation();
     }
 }
 
@@ -577,6 +629,7 @@ static void handle_asset_chunk_raw(const char *args)
     ++s_asset.next_chunk;
     printf("OK ASSET_CHUNK %lu\n", (unsigned long)index);
     fflush(stdout);
+    step_launch_animation();
 }
 
 static void handle_asset_end(const char *id)
@@ -694,15 +747,24 @@ static void handle_asset_use(const char *args)
 
 // refresh_derived_fields fills in everything the device works out for itself
 // rather than being told: the session clock, the wall clock, the live toast and
-// which idle composition is due. Scenes stay pure functions of the state struct
-// so the host render harness can exercise them unchanged.
+// which parts idle is allowed to draw. Scenes stay pure functions of the state
+// struct so the host render harness can exercise them unchanged, which is why
+// the idle_screens setting is resolved here rather than read from the scene.
 static void refresh_derived_fields(void)
 {
     const char *toast = zd_session_toast();
 
     s_pending_state.has_elapsed = zd_session_elapsed(&s_pending_state.elapsed_seconds);
     s_pending_state.clock_minutes = zd_session_clock_minutes();
-    s_pending_state.idle_screen = (zapdisplay_idle_screen_t)zd_tick_idle_screen();
+    s_pending_state.idle_elements = (uint8_t)zd_settings_get(ZD_SETTING_IDLE_SCREENS);
+    strlcpy(s_pending_state.last_title, s_last_title, sizeof(s_pending_state.last_title));
+    strlcpy(s_pending_state.last_system, s_last_system, sizeof(s_pending_state.last_system));
+    // Points at the committed slot, never at the upload buffer, so an upload in
+    // flight cannot free pixels this render is about to read.
+    s_pending_state.last_cover_rgb565 = (const uint16_t *)s_cover.data;
+    s_pending_state.last_cover_width = s_cover.width;
+    s_pending_state.last_cover_height = s_cover.height;
+    s_pending_state.progress_phase = zd_tick_progress_phase();
     s_pending_state.has_toast = toast != NULL;
     if (toast != NULL) {
         strlcpy(s_pending_state.toast, toast, sizeof(s_pending_state.toast));
@@ -711,17 +773,21 @@ static void refresh_derived_fields(void)
     }
 }
 
-// content_snapshot strips the fields that move on their own. A clock ticking,
-// a session counter rolling over or the idle screen rotating are not somebody
+// content_snapshot strips the fields that move on their own. A clock ticking, a
+// session counter rolling over or the progress track marching are not somebody
 // using the device, and counting them as activity would hold the panel at full
-// brightness for as long as it stayed powered.
+// brightness for as long as it stayed powered. The track is the sharpest case:
+// it moves four times a second.
+//
+// idle_elements is deliberately kept. It only changes when someone changes the
+// setting, and that really is a different frame.
 static void content_snapshot(zapdisplay_state_t *out, const zapdisplay_state_t *in)
 {
     memcpy(out, in, sizeof(*out));
     out->elapsed_seconds = 0;
     out->has_elapsed = false;
     out->clock_minutes = -1;
-    out->idle_screen = ZAPDISPLAY_IDLE_BRAND;
+    out->progress_phase = 0;
     out->has_toast = false;
     memset(out->toast, 0, sizeof(out->toast));
 }
@@ -793,18 +859,33 @@ static void send_state(void)
     uint32_t elapsed = 0;
     const bool has_elapsed = zd_session_elapsed(&elapsed);
 
-    printf("STATE scene=%s view=%s panel=%s brightness=%u idle=%lu silent=%lu retention=%u idle_screen=%u "
+    printf("STATE scene=%s view=%s panel=%s brightness=%u idle=%lu silent=%lu retention=%u idle_elements=%u "
            "elapsed=%ld clock=%d toast=%d\n",
            zapdisplay_scene_name(s_pending_state.scene), zapdisplay_view_name(s_pending_state.view),
            zd_tick_panel_level_name(zd_tick_panel_level()), zd_board_backlight_get_percent(),
            (unsigned long)zd_tick_idle_seconds(), (unsigned long)zd_tick_silent_seconds(), zd_scenes_retention_phase(),
-           zd_tick_idle_screen(), has_elapsed ? (long)elapsed : -1L, zd_session_clock_minutes(),
-           zd_session_toast() != NULL ? 1 : 0);
+           (unsigned)zd_settings_get(ZD_SETTING_IDLE_SCREENS), has_elapsed ? (long)elapsed : -1L,
+           zd_session_clock_minutes(), zd_session_toast() != NULL ? 1 : 0);
     fflush(stdout);
+}
+
+// remember_last_played captures the caption for the cover the device is already
+// holding. Done on the way to showing a playing frame rather than at ASSET_USE:
+// a host uploads the artwork before it sends the title, and a launch that ends
+// in an error should not be remembered as something that played.
+static void remember_last_played(void)
+{
+    if (s_pending_state.scene != ZAPDISPLAY_SCENE_PLAYING || s_pending_state.title[0] == '\0') {
+        return;
+    }
+    strlcpy(s_last_title, s_pending_state.title, sizeof(s_last_title));
+    strlcpy(s_last_system, s_pending_state.system, sizeof(s_last_system));
 }
 
 static void handle_show(void)
 {
+    remember_last_played();
+
     const esp_err_t ret = render_state();
 
     if (ret == ESP_OK) {
@@ -998,11 +1079,21 @@ static void send_all_settings(void)
 // apply_setting_side_effects re-applies anything a setting controls outside its
 // own stored value. Brightness and the dim level change the panel now rather
 // than at the next timeout.
-static void apply_setting_side_effects(zd_setting_t setting)
+//
+// Returns true when the frame itself has to be redrawn. The caller does that
+// after answering rather than here: a repaint pushes the whole framebuffer, and
+// a host waiting on OK would notice the delay.
+static bool apply_setting_side_effects(zd_setting_t setting)
 {
     if (setting == ZD_SETTING_BRIGHTNESS || setting == ZD_SETTING_DIM_LEVEL) {
         zd_tick_apply_brightness();
+        return false;
     }
+    if (setting == ZD_SETTING_ROTATION) {
+        zd_hd458002c40_set_rotation(zd_settings_get(setting));
+        return true;
+    }
+    return false;
 }
 
 static void handle_setting_set(const char *args)
@@ -1035,8 +1126,12 @@ static void handle_setting_set(const char *args)
         return;
     }
 
-    apply_setting_side_effects(setting);
+    const bool needs_redraw = apply_setting_side_effects(setting);
+
     ok();
+    if (needs_redraw) {
+        render_state();
+    }
 }
 
 static void handle_setting_get(const char *args)
@@ -1291,11 +1386,13 @@ static void service_tick(void)
     if (result.time_changed && (scene == ZAPDISPLAY_SCENE_PLAYING || scene == ZAPDISPLAY_SCENE_IDLE)) {
         redraw = true;
     }
-    if (result.idle_rotated && scene == ZAPDISPLAY_SCENE_IDLE) {
-        redraw = true;
-    }
+    // A full frame subsumes the band, so the cheap path only runs when nothing
+    // else already needs the whole thing. render_launch_band decides for itself
+    // whether the panel is showing something with a band on it.
     if (redraw) {
         render_state();
+    } else if (result.progress_stepped) {
+        render_launch_band();
     }
 
     flush_events();

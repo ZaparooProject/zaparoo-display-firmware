@@ -139,13 +139,27 @@ reference material for the same panel controller:
 | VSYNC pulse / front porch / back porch | 2 / 14 / 17 |
 | PCLK active high | false |
 
+A full frame costs around 540 ms: the scene is drawn into the 400x960 buffer and
+then copied again into the driver's own, over a PSRAM bus the LCD DMA is already
+reading continuously for scanout. That is the number to have in mind before
+making anything repaint on a timer -- one full frame per step of the launching
+track's quarter-second march nearly doubled asset upload time. Animation pushes
+a window instead; see `zd_hd458002c40_render_progress`.
+
 The active area is wider than the panel deliberately. Driving exactly 320x960
 leaves a band of noise along one edge; the extra 80 columns push it off the
 visible area, and every write is offset into the wider framebuffer.
 
-The logical UI is landscape 960x320 and is rotated 90 degrees clockwise into the
-portrait framebuffer. Only the display driver knows about the rotation and the
-overscan; see `main/ui/canvas.h`.
+The logical UI is landscape 960x320 and is rotated a quarter turn clockwise into
+the portrait framebuffer. Only the display driver knows about the rotation and
+the overscan; see `main/ui/canvas.h`.
+
+The `rotation` setting adds a half turn on top of that for a board mounted the
+other way up. It turns the logical image rather than the panel: no ST7701S scan
+register is touched, and the overscan stays on the same physical edge either
+way, so the noise band cannot reappear on the visible side. 90 and 270 are not
+offered -- they would leave the logical space portrait, and every scene is laid
+out against 960x320.
 
 ## Flash layout
 

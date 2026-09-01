@@ -24,8 +24,8 @@ static bool s_redraw_deferred;
 // this the very next tick would see an idle counter that had just been reset,
 // decide the panel belongs at full, and undo the request.
 static bool s_manual_blank;
-static int64_t s_next_idle_rotate_us;
-static uint8_t s_idle_screen;
+static int64_t s_next_march_us;
+static uint8_t s_progress_phase;
 // Last values actually rendered, so a rollover is detected rather than
 // redrawing on every tick.
 static uint32_t s_shown_elapsed_minutes;
@@ -64,8 +64,8 @@ void zd_tick_init(void)
     s_next_retention_us = s_last_activity_us + ZD_RETENTION_PERIOD_US;
     s_host_absent_reported = false;
     s_redraw_deferred = false;
-    s_next_idle_rotate_us = s_last_activity_us;
-    s_idle_screen = ZAPDISPLAY_IDLE_BRAND;
+    s_next_march_us = s_last_activity_us + ZD_TRACK_MARCH_US;
+    s_progress_phase = 0;
     s_shown_elapsed_minutes = 0;
     s_shown_clock_minutes = -1;
     s_shown_toast = false;
@@ -110,25 +110,24 @@ const char *zd_tick_panel_level_name(zd_panel_level_t level)
     }
 }
 
-uint8_t zd_tick_idle_screen(void)
+uint8_t zd_tick_progress_phase(void)
 {
-    return s_idle_screen;
+    return s_progress_phase;
 }
 
-// next_enabled_idle_screen walks the rotation, skipping anything switched off.
-// A mask of zero means "brand only", which is also what an unset mask should
-// do, so the two cases need no separate handling.
-static uint8_t next_enabled_idle_screen(uint8_t from)
+bool zd_tick_progress_step(void)
 {
-    const uint32_t mask = zd_settings_get(ZD_SETTING_IDLE_SCREENS);
+    const int64_t now = esp_timer_get_time();
 
-    for (int step = 1; step <= ZAPDISPLAY_IDLE_COUNT; step++) {
-        const uint8_t candidate = (uint8_t)((from + step) % ZAPDISPLAY_IDLE_COUNT);
-        if (mask & (1u << candidate)) {
-            return candidate;
-        }
+    if (now < s_next_march_us) {
+        return false;
     }
-    return ZAPDISPLAY_IDLE_BRAND;
+
+    s_progress_phase = (uint8_t)((s_progress_phase + 1) % ZD_TRACK_CELLS);
+    // From now rather than from the deadline: a march that fell behind during a
+    // transfer should resume its cadence, not sprint to catch up.
+    s_next_march_us = now + ZD_TRACK_MARCH_US;
+    return s_level != ZD_PANEL_BLANK;
 }
 
 uint32_t zd_tick_idle_seconds(void)
@@ -212,6 +211,10 @@ zd_tick_result_t zd_tick(void)
         s_redraw_deferred = false;
     }
 
+    // After the level update, so a march that arrives on the same tick as a
+    // blank is not reported as something worth drawing.
+    result.progress_stepped = zd_tick_progress_step();
+
     uint32_t elapsed_s;
     if (zd_session_elapsed(&elapsed_s) && elapsed_s / 60 != s_shown_elapsed_minutes) {
         s_shown_elapsed_minutes = elapsed_s / 60;
@@ -228,16 +231,6 @@ zd_tick_result_t zd_tick(void)
     if (toast_live != s_shown_toast) {
         s_shown_toast = toast_live;
         result.toast_changed = true;
-    }
-
-    const uint32_t idle_rotate = zd_settings_get(ZD_SETTING_IDLE_ROTATE);
-    if (idle_rotate != 0 && now >= s_next_idle_rotate_us) {
-        const uint8_t next = next_enabled_idle_screen(s_idle_screen);
-        s_next_idle_rotate_us = now + (int64_t)idle_rotate * 1000000;
-        if (next != s_idle_screen) {
-            s_idle_screen = next;
-            result.idle_rotated = true;
-        }
     }
 
     const uint32_t host_absent_after = zd_settings_get(ZD_SETTING_HOST_ABSENT_AFTER);

@@ -30,7 +30,9 @@
 // portrait, which is the commonest box-art shape across systems.
 #define ZD_COVER_PLACEHOLDER_W 192
 
-// Idle: a centred mark over a rule over one status line.
+// Idle's resting form: a centred mark over a rule over one status line. The
+// frame idle uses once it has something to say builds its own rhythm from
+// ZD_IDLE_GAP_*, because which rows are present varies.
 #define IDLE_LOGO_Y 94
 #define IDLE_RULE_Y 174
 #define IDLE_STATUS_CAP_TOP 200
@@ -65,10 +67,6 @@ _Static_assert(ZD_CONTENT_RIGHT - (COVER_X + ZD_COVER_MAX_WIDTH + ZD_PAD_GUTTER)
 #define TOAST_Y (ZD_SCREEN_H - ZD_SAFE_Y - TOAST_H)
 #define TOAST_PAD_X 24
 #define TOAST_MAX_W (ZD_CONTENT_W - 2 * ZD_PAD_GUTTER)
-
-// Idle clock: the time is the content, so it takes the hero rung.
-#define IDLE_CLOCK_CAP_TOP 108
-#define IDLE_CLOCK_STATUS_CAP_TOP 196
 
 // Launching and error share one panel so a launch that fails does not
 // rearrange the screen underneath the reader.
@@ -143,9 +141,15 @@ static void format_duration(char *buf, size_t size, uint32_t seconds)
 
 // 24-hour, because a 12-hour clock needs an am/pm marker this layout has no
 // room for and the ambiguity is worse than the unfamiliarity.
+//
+// The value is host-set and its field is wider than a day, so it is wrapped
+// rather than trusted. A bad one should read as the wrong time, not as a
+// five-digit hour running off the end of the buffer.
 static void format_clock(char *buf, size_t size, int minutes_since_midnight)
 {
-    snprintf(buf, size, "%02d:%02d", minutes_since_midnight / 60, minutes_since_midnight % 60);
+    const int minutes = ((minutes_since_midnight % 1440) + 1440) % 1440;
+
+    snprintf(buf, size, "%02d:%02d", minutes / 60, minutes % 60);
 }
 
 // Draws text ending at right_x. There is no right-aligned primitive because
@@ -218,6 +222,15 @@ static artwork_t artwork_of(const zapdisplay_state_t *state)
     };
 }
 
+// The last-played slot carries its own bounds, so it is checked separately
+// rather than through artwork_of: idle must never fall back to the "No cover"
+// plate, which belongs to a session that has one and is missing it.
+static bool last_cover_present(const zapdisplay_state_t *state)
+{
+    return state->last_cover_rgb565 != NULL && state->last_cover_width > 0 && state->last_cover_height > 0 &&
+           state->last_cover_width <= ZD_COVER_MAX_WIDTH && state->last_cover_height <= ZD_COVER_MAX_HEIGHT;
+}
+
 static void draw_artwork(zd_canvas_t *canvas, const artwork_t *art, int x, int y)
 {
     if (art->present) {
@@ -231,83 +244,203 @@ static void draw_artwork(zd_canvas_t *canvas, const artwork_t *art, int x, int y
 
 // -- Idle -------------------------------------------------------------------
 
-// The brand screen is the mark on the
-// page with a single line under it. A second line of status text below the
-// first read as clutter without adding anything the first did not.
-static void draw_idle_brand(zd_canvas_t *canvas, const zapdisplay_state_t *state, retention_offset_t offset)
+// Idle is one composition, not a rotation.
+//
+// It reads left to right in the same grammar as the playing scene: a
+// full-height block, then a column of text beside it. What the device knows
+// fills the column in; what it does not know is left out rather than held open.
+//
+// It used to be three screens taking turns every ten seconds. That drew the
+// status line twice at two different sizes, put a rule on one screen and a
+// different rule on another, and cut between a narrow centred card and a
+// full-width layout -- three unrelated screens rather than one device. Nothing
+// rotates now. Retention is covered by the offset every scene shifts through,
+// by the clock changing on its own, and by the dim and blank timeouts that do
+// the real work anyway; see ui/theme.h.
+//
+// Which parts may appear is the idle_screens setting, resolved into
+// state->idle_elements by the protocol so this stays a pure function of state.
+
+// A row of the idle column. section_rule draws it as a heading sitting on a
+// hairline rather than as a plain line of text.
+typedef struct {
+    const zd_font_t *font;
+    const char *text;
+    uint16_t color;
+    // Space between the previous row's cap bottom and this row's cap top.
+    int gap_above;
+    bool section_rule;
+} idle_row_t;
+
+static int idle_row_height(const idle_row_t *row)
 {
+    if (row->section_rule) {
+        return row->font->cap_height + ZD_PAD_LABEL_RULE + ZD_STROKE_RULE;
+    }
+    return row->font->cap_height;
+}
+
+// Lays the rows out as one group, centred in the safe area. Centring the group
+// rather than pinning it to fixed rungs is what lets rows drop out: a device
+// with no clock and nothing played yet shows a shorter column in the same
+// place, instead of a full-height layout with holes in it.
+static void draw_idle_column(zd_canvas_t *canvas, const idle_row_t *rows, size_t count, int x, int width, int offset_y)
+{
+    int total = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        total += rows[i].gap_above + idle_row_height(&rows[i]);
+    }
+
+    int cap_top = ZD_SAFE_Y + (ZD_SCREEN_H - 2 * ZD_SAFE_Y - total) / 2 + offset_y;
+
+    for (size_t i = 0; i < count; i++) {
+        cap_top += rows[i].gap_above;
+        if (rows[i].section_rule) {
+            zd_canvas_draw_section_header(canvas, x, zd_baseline_for_cap_top(rows[i].font, cap_top), width,
+                                          rows[i].font, rows[i].text, rows[i].color, ZD_PAD_LABEL_RULE, ZD_STROKE_RULE,
+                                          ZD_C_BORDER_MID);
+        } else {
+            zd_canvas_draw_text_elided(canvas, x, zd_baseline_for_cap_top(rows[i].font, cap_top), width, rows[i].font,
+                                       rows[i].text, rows[i].color);
+        }
+        cap_top += idle_row_height(&rows[i]);
+    }
+}
+
+// Nothing to say yet: the mark on the page with one line under it. This is the
+// same status treatment the column uses, so the two forms read as one device
+// rather than as two screens.
+static void draw_idle_resting(zd_canvas_t *canvas, const zapdisplay_state_t *state, retention_offset_t offset,
+                              bool want_mark)
+{
+    const char *status = field(state->status, "Waiting for a host");
+
+    if (!want_mark) {
+        zd_canvas_draw_text_centered(
+            canvas, ZD_SCREEN_W / 2 + offset.x,
+            zd_baseline_centered(&zd_font_section, ZD_SAFE_Y + offset.y, ZD_SCREEN_H - 2 * ZD_SAFE_Y), ZD_CONTENT_W,
+            &zd_font_section, status, ZD_C_TEXT_VARIANT);
+        return;
+    }
+
     const int logo_x = (ZD_SCREEN_W - zd_logo_256.width) / 2 + offset.x;
 
     zd_canvas_draw_logo(canvas, logo_x, IDLE_LOGO_Y + offset.y, &zd_logo_256, ZD_C_TEXT_PRIMARY);
     zd_canvas_fill_rect(canvas, logo_x, IDLE_RULE_Y + offset.y, zd_logo_256.width, ZD_STROKE_RULE, ZD_C_BORDER_MID);
-    zd_canvas_draw_text_centered(
-        canvas, ZD_SCREEN_W / 2 + offset.x, zd_baseline_for_cap_top(&zd_font_section, IDLE_STATUS_CAP_TOP + offset.y),
-        ZD_CONTENT_W, &zd_font_section, field(state->status, "Waiting for a host"), ZD_C_TEXT_VARIANT);
+    zd_canvas_draw_text_centered(canvas, ZD_SCREEN_W / 2 + offset.x,
+                                 zd_baseline_for_cap_top(&zd_font_section, IDLE_STATUS_CAP_TOP + offset.y),
+                                 ZD_CONTENT_W, &zd_font_section, status, ZD_C_TEXT_VARIANT);
 }
 
-static void draw_idle_clock(zd_canvas_t *canvas, const zapdisplay_state_t *state, retention_offset_t offset)
+// draw_idle_block fills the left of the frame and returns how wide it turned
+// out. Artwork when there is any, the mark otherwise; zero when neither is
+// wanted, which lets the column take the whole width rather than sit in a
+// gutter measured from nothing.
+// draw_idle_block fills the left of the frame: artwork when there is any, the
+// mark otherwise, nothing when neither is wanted.
+static void draw_idle_block(zd_canvas_t *canvas, const zapdisplay_state_t *state, retention_offset_t offset,
+                            bool want_mark, bool has_cover, int x)
+{
+    if (has_cover) {
+        const int art_y = COVER_Y + (ZD_COVER_MAX_HEIGHT - state->last_cover_height) / 2 + offset.y;
+
+        zd_canvas_blit_rgb565_round(canvas, x + offset.x, art_y, state->last_cover_rgb565, state->last_cover_width,
+                                    state->last_cover_height, ZD_RADIUS_MD);
+        return;
+    }
+
+    if (!want_mark) {
+        return;
+    }
+
+    // The mark is wide and short where the column is tall, so the two are
+    // centred on the same axis rather than aligned to a shared top edge.
+    zd_canvas_draw_logo(canvas, x + offset.x,
+                        ZD_SAFE_Y + (ZD_SCREEN_H - 2 * ZD_SAFE_Y - zd_logo_256.height) / 2 + offset.y, &zd_logo_256,
+                        ZD_C_TEXT_PRIMARY);
+}
+
+// idle_column_width sizes the column to its own content rather than to the far
+// edge of the panel. Idle is a resting composition, not a layout that has to
+// fill a fixed split: a rule running two hundred pixels past the last word
+// reads as an unfinished frame. Clamped so a short status line still gets a
+// column worth looking at, and so a long title cannot push past what is left.
+static int idle_column_width(const idle_row_t *rows, size_t count, int available)
+{
+    int width = ZD_IDLE_COLUMN_MIN_W;
+
+    for (size_t i = 0; i < count; i++) {
+        const int row_w = zd_canvas_text_width(rows[i].font, rows[i].text);
+        if (row_w > width) {
+            width = row_w;
+        }
+    }
+    return width > available ? available : width;
+}
+
+static void draw_idle_frame(zd_canvas_t *canvas, const zapdisplay_state_t *state, retention_offset_t offset,
+                            bool want_mark, bool want_clock, bool want_last)
 {
     char clock[8];
+    idle_row_t rows[5];
+    size_t count = 0;
+    const bool has_cover = want_last && last_cover_present(state);
+    const int block_w = has_cover ? state->last_cover_width : (want_mark ? zd_logo_256.width : 0);
 
-    format_clock(clock, sizeof(clock), state->clock_minutes);
-    zd_canvas_draw_text_centered(canvas, ZD_SCREEN_W / 2 + offset.x,
-                                 zd_baseline_for_cap_top(&zd_font_hero, IDLE_CLOCK_CAP_TOP + offset.y), ZD_CONTENT_W,
-                                 &zd_font_hero, clock, ZD_C_TEXT_PRIMARY);
-    zd_canvas_draw_text_centered(canvas, ZD_SCREEN_W / 2 + offset.x,
-                                 zd_baseline_for_cap_top(&zd_font_caption, IDLE_CLOCK_STATUS_CAP_TOP + offset.y),
-                                 ZD_CONTENT_W, &zd_font_caption, field(state->status, "Ready"), ZD_C_TEXT_LABEL);
+    if (want_clock) {
+        format_clock(clock, sizeof(clock), state->clock_minutes);
+        rows[count++] = (idle_row_t){&zd_font_hero, clock, ZD_C_TEXT_PRIMARY, 0, false};
+    }
+
+    // One status line, in one size, in one place. Having it on every screen at
+    // a different rung was the thing that made the old idle read as a mistake.
+    rows[count] = (idle_row_t){&zd_font_section, field(state->status, "Ready"), ZD_C_TEXT_VARIANT,
+                               count == 0 ? 0 : ZD_IDLE_GAP_STATUS, false};
+    count++;
+
+    if (want_last) {
+        rows[count++] = (idle_row_t){&zd_font_caption, "Last played", ZD_C_TEXT_LABEL, ZD_IDLE_GAP_SECTION, true};
+        rows[count++] = (idle_row_t){&zd_font_title, state->last_title, ZD_C_TEXT_PRIMARY, ZD_IDLE_GAP_TITLE, false};
+        if (state->last_system[0] != '\0') {
+            rows[count++] =
+                (idle_row_t){&zd_font_section, state->last_system, ZD_C_TEXT_VARIANT, ZD_IDLE_GAP_ROW, false};
+        }
+    }
+
+    // The block and the column are centred together, so what is on screen sits
+    // in the middle of the panel however much of it there is. Anchoring the
+    // block to the left edge instead left a device with only a clock huddled in
+    // one third of a very wide panel.
+    const int gutter = block_w > 0 ? ZD_PAD_GUTTER : 0;
+    const int column_w = idle_column_width(rows, count, ZD_CONTENT_W - block_w - gutter);
+    const int group_x = (ZD_SCREEN_W - (block_w + gutter + column_w)) / 2;
+
+    draw_idle_block(canvas, state, offset, want_mark, has_cover, group_x);
+    draw_idle_column(canvas, rows, count, group_x + block_w + gutter + offset.x, column_w, offset.y);
 }
 
-// Reuses the artwork the device already holds rather than asking for more. The
-// cover slot survives CLEAR, so whatever was last played is still there.
-static void draw_idle_last_played(zd_canvas_t *canvas, const zapdisplay_state_t *state, retention_offset_t offset)
-{
-    const artwork_t art = artwork_of(state);
-    const int art_y = COVER_Y + (ZD_COVER_MAX_HEIGHT - art.height) / 2 + offset.y;
-    const int text_x = COVER_X + art.width + ZD_PAD_GUTTER + offset.x;
-    const int text_w = ZD_CONTENT_RIGHT - (COVER_X + art.width + ZD_PAD_GUTTER);
-
-    draw_artwork(canvas, &art, COVER_X + offset.x, art_y);
-    zd_canvas_draw_section_header(
-        canvas, text_x, zd_baseline_for_cap_top(&zd_font_caption, DETAIL_SYSTEM_CAP_TOP + offset.y), text_w,
-        &zd_font_caption, "Last played", ZD_C_TEXT_LABEL, ZD_PAD_LABEL_RULE, ZD_STROKE_RULE, ZD_C_BORDER_MID);
-    zd_canvas_draw_text_elided(canvas, text_x, zd_baseline_for_cap_top(&zd_font_title, DETAIL_TITLE_CAP_TOP + offset.y),
-                               text_w, &zd_font_title, state->title, ZD_C_TEXT_PRIMARY);
-    zd_canvas_draw_text_elided(canvas, text_x,
-                               zd_baseline_for_cap_top(&zd_font_section, DETAIL_STATUS_CAP_TOP + offset.y), text_w,
-                               &zd_font_section, state->system, ZD_C_TEXT_VARIANT);
-}
-
-// Idle rotates rather than resting on one composition: it is the state the
-// panel sits in longest, so a fixed frame here is the worst thing on the
-// device for retention. A screen with nothing to say falls back to the brand
-// rather than showing an empty frame -- the clock is unknown until a host sets
-// it, and there is no last-played before the first launch.
 static void draw_idle(zd_canvas_t *canvas, const zapdisplay_state_t *state)
 {
     const retention_offset_t offset = retention_offset();
+    // A mask with nothing set means the mark alone. That is what it has always
+    // meant and it is the only sensible reading of "show none of these".
+    const uint8_t elements = state->idle_elements != 0 ? state->idle_elements : (uint8_t)(1u << ZAPDISPLAY_IDLE_BRAND);
+    const bool want_mark = (elements & (1u << ZAPDISPLAY_IDLE_BRAND)) != 0;
+    const bool want_clock = (elements & (1u << ZAPDISPLAY_IDLE_CLOCK)) != 0 && state->clock_minutes >= 0;
+    const bool want_last = (elements & (1u << ZAPDISPLAY_IDLE_LAST_PLAYED)) != 0 && state->last_title[0] != '\0';
 
     zd_canvas_fill_active(canvas, ZD_C_BG_DEEP);
 
-    switch (state->idle_screen) {
-    case ZAPDISPLAY_IDLE_CLOCK:
-        if (state->clock_minutes >= 0) {
-            draw_idle_clock(canvas, state, offset);
-            return;
-        }
-        break;
-    case ZAPDISPLAY_IDLE_LAST_PLAYED:
-        if (state->cover_rgb565 != NULL && state->title[0] != '\0') {
-            draw_idle_last_played(canvas, state, offset);
-            return;
-        }
-        break;
-    case ZAPDISPLAY_IDLE_BRAND:
-    default:
-        break;
+    // With neither a clock nor anything played, the column is one status line
+    // and the frame would be a mark stranded beside it. That is the resting
+    // form's job.
+    if (!want_clock && !want_last) {
+        draw_idle_resting(canvas, state, offset, want_mark);
+        return;
     }
 
-    draw_idle_brand(canvas, state, offset);
+    draw_idle_frame(canvas, state, offset, want_mark, want_clock, want_last);
 }
 
 // -- Playing ----------------------------------------------------------------
@@ -445,6 +578,54 @@ static void draw_panel(zd_canvas_t *canvas, const char *heading, uint16_t headin
                                   ZD_STROKE_RULE, ZD_C_BORDER_MID);
 }
 
+// The track's own geometry, offset with everything else on the scene.
+static zd_rect_t progress_rect(retention_offset_t offset)
+{
+    return (zd_rect_t){
+        .x = ZD_PANEL_INNER_X + offset.x,
+        .y = PANEL_TRACK_Y + offset.y,
+        .width = ZD_TRACK_CELLS * ZD_TRACK_CELL_W + (ZD_TRACK_CELLS - 1) * ZD_TRACK_GAP,
+        .height = ZD_TRACK_CELL_H,
+    };
+}
+
+// draw_progress paints the track over the panel fill it sits on, clearing to
+// that fill first so the band is self-contained: every pixel in it is written
+// from the state alone, never from what the last frame left there.
+//
+// At the current radius the cells are hard-edged -- corner coverage lands on 0
+// or full, never between -- so nothing would carry over today. That is a
+// property of ZD_RADIUS_SM against this cell size, not of the design, and a
+// softer corner would make each partial redraw blend over the last one's and
+// drift a little further every step. The clear is one 308x14 fill; the
+// alternative is a class of bug that only appears when someone adjusts a
+// radius. tests/render checks the two paths agree.
+static void draw_progress(zd_canvas_t *canvas, const zapdisplay_state_t *state, retention_offset_t offset)
+{
+    const zd_rect_t track = progress_rect(offset);
+
+    zd_canvas_fill_rect(canvas, track.x, track.y, track.width, track.height, ZD_C_BG_PANEL);
+    // One cell marching rather than a fill: the device is told a launch
+    // started, never how far along it is. See ui/theme.h.
+    zd_canvas_draw_progress_track(canvas, track.x, track.y, ZD_TRACK_CELLS, state->progress_phase % ZD_TRACK_CELLS, 1,
+                                  ZD_TRACK_CELL_W, ZD_TRACK_CELL_H, ZD_TRACK_GAP, ZD_RADIUS_SM,
+                                  zd_theme_accent(state->accent_color, state->has_accent), ZD_C_BORDER_SUBTLE);
+}
+
+bool zd_scenes_progress_rect(const zapdisplay_state_t *state, zd_rect_t *out)
+{
+    if (state->scene != ZAPDISPLAY_SCENE_LAUNCHING) {
+        return false;
+    }
+    *out = progress_rect(retention_offset());
+    return true;
+}
+
+void zd_scenes_draw_progress(zd_canvas_t *canvas, const zapdisplay_state_t *state)
+{
+    draw_progress(canvas, state, retention_offset());
+}
+
 static void draw_launching(zd_canvas_t *canvas, const zapdisplay_state_t *state)
 {
     const retention_offset_t offset = retention_offset();
@@ -458,9 +639,7 @@ static void draw_launching(zd_canvas_t *canvas, const zapdisplay_state_t *state)
     zd_canvas_draw_text_elided(
         canvas, ZD_PANEL_INNER_X + offset.x, zd_baseline_for_cap_top(&zd_font_section, PANEL_STATUS_CAP_TOP + offset.y),
         ZD_PANEL_INNER_W, &zd_font_section, field(state->status, field(state->message, "Starting")), ZD_C_TEXT_VARIANT);
-    zd_canvas_draw_progress_track(canvas, ZD_PANEL_INNER_X + offset.x, PANEL_TRACK_Y + offset.y, ZD_TRACK_CELLS,
-                                  ZD_TRACK_FILLED, ZD_TRACK_CELL_W, ZD_TRACK_CELL_H, ZD_TRACK_GAP, ZD_RADIUS_SM,
-                                  zd_theme_accent(state->accent_color, state->has_accent), ZD_C_BORDER_SUBTLE);
+    draw_progress(canvas, state, offset);
 }
 
 static void draw_error(zd_canvas_t *canvas, const zapdisplay_state_t *state)

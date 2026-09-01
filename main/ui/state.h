@@ -36,8 +36,13 @@ typedef enum {
     ZAPDISPLAY_VIEW_COUNT,
 } zapdisplay_view_t;
 
-// Which composition the idle scene is currently showing. Idle is the state the
-// panel sits in longest, so it rotates rather than resting on one frame.
+// The parts idle may show, as bit positions in the idle_screens setting.
+//
+// These used to be three compositions taking turns. They are now three elements
+// of one frame: the mark, the time, and what was last played. Taking turns cost
+// more than it bought -- the same status line was drawn twice at two different
+// sizes, and the panel cut between a narrow centred card and a full-width
+// layout every ten seconds. See ui/scenes.c.
 typedef enum {
     ZAPDISPLAY_IDLE_BRAND = 0,
     ZAPDISPLAY_IDLE_CLOCK,
@@ -61,11 +66,25 @@ typedef struct {
     char genre[32];
     char players[16];
     const uint16_t *cover_rgb565;
+    // What was last actually played. Kept apart from title/system/cover so idle
+    // can show it without a host re-sending anything, and so a CLEAR followed by
+    // some other scene cannot pick it up by accident. Captured when a playing
+    // frame is shown, which is also what keeps a launch that failed from being
+    // remembered as something played. Held in RAM, so it survives CLEAR but not
+    // a reset, like everything else the host pushes.
+    char last_title[64];
+    char last_system[48];
+    const uint16_t *last_cover_rgb565;
+    uint16_t last_cover_width;
+    uint16_t last_cover_height;
     uint16_t accent_color;
     uint16_t cover_width;
     uint16_t cover_height;
     zapdisplay_view_t view;
-    zapdisplay_idle_screen_t idle_screen;
+    // Bitmask over zapdisplay_idle_screen_t. Resolved from the idle_screens
+    // setting by the protocol so scenes stay pure functions of this struct; a
+    // mask of zero means the mark alone.
+    uint8_t idle_elements;
 
     // -- Values that change on their own as time passes -------------------
     //
@@ -80,6 +99,13 @@ typedef struct {
     // reset.
     int16_t clock_minutes;
     bool has_elapsed;
+
+    // Which cell of the launching scene's progress track is lit. A counter the
+    // tick advances rather than a function of uptime, so it keeps moving with
+    // no host attached, and excluded from the "did the frame change" comparison
+    // for the same reason the clock is: a bar marching is not somebody using
+    // the device.
+    uint8_t progress_phase;
 
     // Transient banner over whatever scene is current. Used for token scan
     // feedback; composes with every scene, so it needs no scene of its own.

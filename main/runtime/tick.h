@@ -34,10 +34,12 @@ typedef struct {
     bool redraw;
     // A displayed minute rolled over -- session elapsed or the wall clock.
     bool time_changed;
-    // The idle screen rotated.
-    bool idle_rotated;
     // A toast appeared or expired.
     bool toast_changed;
+    // The progress track advanced a cell. Reported only while the panel is lit:
+    // there is nothing to see on a blank one, and repainting for it would push
+    // a whole framebuffer for nobody.
+    bool progress_stepped;
     // Fires once per silent stretch. The host has been silent long enough to be
     // presumed gone, and the caller should drop back to a safe resting state
     // rather than leave a stale session frame up.
@@ -80,6 +82,14 @@ void zd_tick_toggle_blank(void);
 // Call after changing the brightness or dim level.
 void zd_tick_apply_brightness(void);
 
-// Which idle composition is due. Skips screens disabled in settings, so a
-// device with only one enabled simply never rotates.
-uint8_t zd_tick_idle_screen(void);
+// Which cell of the progress track is lit. Free-running and deliberately not
+// reset when a launch starts: a bar that always begins at the left edge implies
+// a progress the device does not have.
+uint8_t zd_tick_progress_phase(void);
+
+// Advances the march if its interval has elapsed, and reports whether the panel
+// should be repainted for it. zd_tick calls this itself; it is exported for the
+// asset upload path, where the loop sits inside framed payload windows for the
+// length of a transfer and zd_tick never runs. Only the march is stepped -- the
+// idle policy and the host-absent countdown belong to the loop body.
+bool zd_tick_progress_step(void);

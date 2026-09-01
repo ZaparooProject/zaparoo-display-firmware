@@ -168,8 +168,20 @@ by `OK`.
 | `blank_after` | 0-86400 | 1800 | Seconds before blanking. 0 disables. |
 | `host_absent` | 0-86400 | 600 | Seconds of host silence before falling back to idle. 0 disables. |
 | `view` | 0-2 | 1 | Starting playing view: art, detail, meta. |
-| `idle_rotate` | 0-3600 | 10 | Seconds between idle screens. 0 pins one. |
-| `idle_screens` | 0-7 | 7 | Bitmask: brand, clock, last played. |
+| `idle_screens` | 0-7 | 7 | Bitmask of the idle frame's parts: mark, clock, last played. 0 leaves the mark alone. |
+| `rotation` | 0 or 180 | 0 | Turns the UI for a display mounted the other way up. |
+
+`idle_screens` selects which parts of the idle frame may appear, not which of
+several screens is due. Idle used to rotate between three compositions and no
+longer does; `idle_rotate` is gone with it. Both are protocol-visible changes,
+but neither needs a version bump: `SETTINGS` enumerates keys rather than hosts
+assuming them, and no host in the pairing reads or writes either one.
+
+`rotation` takes only 0 and 180; any other value answers `ERR bad-value`. The
+device has one landscape layout, so 90 and 270 would need a UI it does not have
+rather than a transform. It applies immediately and survives a power cycle,
+because a display plugged into a dead host still has to come up the right way
+up.
 
 `dim_after` counts from the last *visible change*, not the last command. A host
 refreshing an unchanging frame every two seconds still lets the panel dim, which
@@ -224,7 +236,7 @@ offset, rotating idle screens - is otherwise invisible to a host and untestable
 without watching the screen:
 
 ```text
-STATE scene=playing view=detail panel=full brightness=100 idle=12 silent=0 retention=2 idle_screen=0 elapsed=4980 clock=875 toast=0
+STATE scene=playing view=detail panel=full brightness=100 idle=12 silent=0 retention=2 idle_elements=7 elapsed=4980 clock=875 toast=0
 ```
 
 `elapsed` is -1 when unset, `clock` is -1 when no host has set the time.
@@ -234,6 +246,11 @@ and derives its own backgrounds, borders and text colours from it,
 so it does not repaint scene chrome. It tints the elements the design draws in
 the accent, such as the launching scene's progress track. An accent too dark to
 read against the page is ignored in favour of the palette's own.
+
+The launching scene's track is indeterminate: one cell is lit and marches across
+it, wrapping. The device is told a launch has started, never how far along it
+is, so there is no progress to report and no command to report it with. A host
+with something to say about a launch should say it in `STATUS` or `MESSAGE`.
 
 Diagnostic benchmark command reads exactly N payload bytes and reports device-side receive rate:
 
@@ -351,7 +368,7 @@ Responses:
 OK zapdisplay/1
 INFO zapdisplay/1 fw=0.1.0 display=hd458002c40 visible=320x960 transport=cdc features=scenes,assets-b64,assets-raw,quiet,settings,views,meta,toast,clock,input
 SETTING brightness 100
-STATE scene=idle view=detail panel=full brightness=100 idle=0 silent=0 retention=0 idle_screen=0 elapsed=-1 clock=-1 toast=0
+STATE scene=idle view=detail panel=full brightness=100 idle=0 silent=0 retention=0 idle_elements=7 elapsed=-1 clock=-1 toast=0
 EVENT button 1 click
 PONG
 READY zapdisplay/1 fw=0.1.0 display=hd458002c40_320x960

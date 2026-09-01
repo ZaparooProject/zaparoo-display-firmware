@@ -21,25 +21,32 @@ typedef struct {
     const char *name;
     uint32_t min;
     uint32_t max;
+    // Allowed increment above min, or 0 for any value in the range. A setting
+    // whose valid values are not a contiguous run says so here rather than
+    // leaving the call site to re-check it.
+    uint32_t step;
     uint32_t fallback;
 } setting_spec_t;
 
 // clang-format off
 static const setting_spec_t SPECS[ZD_SETTING_COUNT] = {
-    [ZD_SETTING_BRIGHTNESS]  = {"brightness",  0, 100,   ZD_BRIGHTNESS_DEFAULT},
-    [ZD_SETTING_DIM_LEVEL]   = {"dim_level",   0, 100,   ZD_DIM_LEVEL_DEFAULT},
+    [ZD_SETTING_BRIGHTNESS]  = {"brightness",  0, 100,   0, ZD_BRIGHTNESS_DEFAULT},
+    [ZD_SETTING_DIM_LEVEL]   = {"dim_level",   0, 100,   0, ZD_DIM_LEVEL_DEFAULT},
     // 0 disables the timeout entirely. The upper bound is 24 hours; anything
     // longer is indistinguishable from "never" and 0 already says that.
-    [ZD_SETTING_DIM_AFTER]   = {"dim_after",   0, 86400, ZD_IDLE_DIM_AFTER_S_DEFAULT},
-    [ZD_SETTING_BLANK_AFTER] = {"blank_after", 0, 86400, ZD_IDLE_BLANK_AFTER_S_DEFAULT},
-    [ZD_SETTING_HOST_ABSENT_AFTER] = {"host_absent", 0, 86400, ZD_HOST_ABSENT_AFTER_S_DEFAULT},
+    [ZD_SETTING_DIM_AFTER]   = {"dim_after",   0, 86400, 0, ZD_IDLE_DIM_AFTER_S_DEFAULT},
+    [ZD_SETTING_BLANK_AFTER] = {"blank_after", 0, 86400, 0, ZD_IDLE_BLANK_AFTER_S_DEFAULT},
+    [ZD_SETTING_HOST_ABSENT_AFTER] = {"host_absent", 0, 86400, 0, ZD_HOST_ABSENT_AFTER_S_DEFAULT},
     // Which playing view the device starts in and returns to on CLEAR. Indexes
     // zapdisplay_view_t.
-    [ZD_SETTING_VIEW]        = {"view",         0, ZAPDISPLAY_VIEW_COUNT - 1, ZAPDISPLAY_VIEW_DETAIL},
-    [ZD_SETTING_IDLE_ROTATE] = {"idle_rotate",  0, 3600, ZD_IDLE_ROTATE_S_DEFAULT},
-    // Bitmask over zapdisplay_idle_screen_t: bit 0 brand, bit 1 clock, bit 2
-    // last played. 0 pins idle to the brand screen.
-    [ZD_SETTING_IDLE_SCREENS] = {"idle_screens", 0, (1u << ZAPDISPLAY_IDLE_COUNT) - 1, ZD_IDLE_SCREENS_DEFAULT},
+    [ZD_SETTING_VIEW]        = {"view",         0, ZAPDISPLAY_VIEW_COUNT - 1, 0, ZAPDISPLAY_VIEW_DETAIL},
+    // Bitmask over zapdisplay_idle_screen_t: bit 0 the mark, bit 1 the clock,
+    // bit 2 last played. 0 leaves idle as the mark alone.
+    [ZD_SETTING_IDLE_SCREENS] = {"idle_screens", 0, (1u << ZAPDISPLAY_IDLE_COUNT) - 1, 0, ZD_IDLE_SCREENS_DEFAULT},
+    // Degrees, and only the two the UI has a layout for. A step of 180 is what
+    // rejects 90 and 270; if a portrait layout ever lands this becomes
+    // {0, 270, 90}. See ui/canvas.h.
+    [ZD_SETTING_ROTATION]    = {"rotation",     0, 180, 180, ZD_ROTATION_DEFAULT},
 };
 // clang-format on
 
@@ -110,7 +117,13 @@ bool zd_settings_in_range(zd_setting_t setting, uint32_t value)
     if (setting < 0 || setting >= ZD_SETTING_COUNT) {
         return false;
     }
-    return value >= SPECS[setting].min && value <= SPECS[setting].max;
+
+    const setting_spec_t *spec = &SPECS[setting];
+
+    if (value < spec->min || value > spec->max) {
+        return false;
+    }
+    return spec->step == 0 || (value - spec->min) % spec->step == 0;
 }
 
 esp_err_t zd_settings_set(zd_setting_t setting, uint32_t value)

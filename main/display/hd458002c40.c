@@ -15,10 +15,13 @@
 #include "esp_lcd_panel_rgb.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hal/lcd_types.h"
+#include "settings/settings.h"
 #include "ui/scenes.h"
+#include "ui/theme.h"
 
 static const char *TAG = "display";
 
@@ -195,6 +198,17 @@ static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_framebuffer;
 static zd_canvas_t s_canvas;
 
+// esp_lcd_panel_draw_bitmap wants its source packed to the window it is given,
+// so a band out of the middle of the framebuffer has to be gathered first. Held
+// in internal RAM: it is the one buffer in this path that is read rather than
+// written, and putting it in PSRAM would add a third crossing of a bus that is
+// already the bottleneck.
+//
+// Sized from the track's own geometry. The rotation transposes the band and the
+// retention offset moves it, but neither changes its area.
+#define TRACK_BAND_PX ((ZD_TRACK_CELLS * ZD_TRACK_CELL_W + (ZD_TRACK_CELLS - 1) * ZD_TRACK_GAP) * ZD_TRACK_CELL_H)
+static uint16_t s_band[TRACK_BAND_PX];
+
 esp_err_t zd_hd458002c40_init(void)
 {
     if (s_panel != NULL) {
@@ -265,6 +279,9 @@ esp_err_t zd_hd458002c40_init(void)
         .logical_width = timing->visible_height,
         .logical_height = timing->visible_width,
         .overscan_left = timing->overscan_left,
+        // Settings are loaded before the panel comes up, so the first frame is
+        // already the right way up rather than flipping once after boot.
+        .rotation = (uint16_t)zd_settings_get(ZD_SETTING_ROTATION),
     };
 
     // The backlight deliberately stays off here. Bringing it up at this point
@@ -275,15 +292,59 @@ esp_err_t zd_hd458002c40_init(void)
     return ESP_OK;
 }
 
+void zd_hd458002c40_set_rotation(uint32_t degrees)
+{
+    if (degrees != 0 && degrees != 180) {
+        return;
+    }
+    s_canvas.rotation = (uint16_t)degrees;
+}
+
+esp_err_t zd_hd458002c40_render_progress(const zapdisplay_state_t *state)
+{
+    ESP_RETURN_ON_FALSE(s_panel != NULL && s_framebuffer != NULL, ESP_ERR_INVALID_STATE, TAG,
+                        "display renderer not initialized");
+
+    zd_rect_t logical;
+    zd_rect_t band;
+
+    // A full frame is always correct, only slow, so anything unexpected about
+    // the band falls back to one rather than pushing a window that might be
+    // wrong.
+    if (!zd_scenes_progress_rect(state, &logical) || !zd_canvas_physical_rect(&s_canvas, logical, &band) ||
+        (size_t)band.width * (size_t)band.height > TRACK_BAND_PX) {
+        return zd_hd458002c40_render(state);
+    }
+
+    zd_scenes_draw_progress(&s_canvas, state);
+
+    for (int row = 0; row < band.height; ++row) {
+        memcpy(&s_band[(size_t)row * band.width],
+               &s_framebuffer[(size_t)(band.y + row) * s_canvas.active_width + band.x],
+               (size_t)band.width * sizeof(uint16_t));
+    }
+
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_panel_draw_bitmap(s_panel, band.x, band.y, band.x + band.width, band.y + band.height, s_band), TAG,
+        "draw progress band failed");
+    return ESP_OK;
+}
+
 esp_err_t zd_hd458002c40_render(const zapdisplay_state_t *state)
 {
     ESP_RETURN_ON_FALSE(s_panel != NULL && s_framebuffer != NULL, ESP_ERR_INVALID_STATE, TAG,
                         "display renderer not initialized");
 
-    ESP_LOGD(TAG, "Render scene: %s", zapdisplay_scene_name(state->scene));
+    const int64_t started_us = esp_timer_get_time();
+
     zd_scenes_draw(&s_canvas, state);
     ESP_RETURN_ON_ERROR(
         esp_lcd_panel_draw_bitmap(s_panel, 0, 0, s_canvas.active_width, s_canvas.active_height, s_framebuffer), TAG,
         "draw scene failed");
+    // The launching track repaints four times a second, so what a frame costs
+    // decides whether the march is affordable. It varies with the scene, which
+    // is why this is a log line rather than a number measured once and written
+    // into a comment.
+    ESP_LOGD(TAG, "Render scene %s: %lld us", zapdisplay_scene_name(state->scene), esp_timer_get_time() - started_us);
     return ESP_OK;
 }

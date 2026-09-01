@@ -30,8 +30,8 @@ typedef enum {
     ZD_SETTING_BLANK_AFTER,
     ZD_SETTING_HOST_ABSENT_AFTER,
     ZD_SETTING_VIEW,
-    ZD_SETTING_IDLE_ROTATE,
     ZD_SETTING_IDLE_SCREENS,
+    ZD_SETTING_ROTATION,
     ZD_SETTING_COUNT,
 } zd_setting_t;
 
@@ -45,6 +45,10 @@ bool zd_settings_lookup(const char *name, zd_setting_t *out);
 
 const char *zd_settings_name(zd_setting_t setting);
 uint32_t zd_settings_get(zd_setting_t setting);
+
+// True when the value is one this setting accepts. Most settings take any value
+// in a contiguous range; a few, such as the display rotation, accept only
+// certain steps within it.
 bool zd_settings_in_range(zd_setting_t setting, uint32_t value);
 
 // Validates, applies and persists. Returns ESP_ERR_INVALID_ARG for a value out

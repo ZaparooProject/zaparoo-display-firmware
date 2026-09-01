@@ -61,6 +61,12 @@
 #define ZD_SCREEN_W 960
 #define ZD_SCREEN_H 320
 
+// Which way up that landscape space is drawn. 0 is the panel's own orientation;
+// 180 flips it for a board mounted the other way up. The logical space is
+// identical either way, which is why no scene knows about it and why 90 and 270
+// are not offered. See ui/canvas.h.
+#define ZD_ROTATION_DEFAULT 0
+
 // Outer safe area. Cover art is pushed out to this edge, because on a 320px
 // panel every pixel spent on chrome is a pixel of artwork lost.
 #define ZD_SAFE_X 16
@@ -93,15 +99,27 @@
 // -- Progress track ---------------------------------------------------------
 //
 // Discrete cells rather than a continuous fill: a continuous fill's right edge
-// lands on a fractional pixel. The design system blinks one cell; here every redraw
-// pushes the whole framebuffer, so an animated cell would cost a full frame per
-// blink for no information. The track is static.
+// lands on a fractional pixel.
+//
+// One cell is lit and marches left to right, wrapping. This is indeterminate on
+// purpose: the device is told a launch has started, not how long it will take,
+// and a bar that fills to the end and then sits there while the game is still
+// loading says something untrue. The app's track does the same thing while the
+// database optimises.
+//
+// A quarter second a step, so one pass across the track takes three seconds:
+// slow enough to read as deliberate, quick enough to look alive.
+//
+// The interval is affordable only because a step repaints this band alone. A
+// full frame measures around 540 ms on this panel, twice the interval; pushing
+// one per step took a 227 KB cover upload from 4.8 s to 8.6 s. See
+// zd_hd458002c40_render_progress.
 
 #define ZD_TRACK_CELLS 12
 #define ZD_TRACK_CELL_W 22
 #define ZD_TRACK_CELL_H 14
 #define ZD_TRACK_GAP 4
-#define ZD_TRACK_FILLED 3
+#define ZD_TRACK_MARCH_US (250 * 1000)
 
 // -- Image retention --------------------------------------------------------
 //
@@ -133,12 +151,23 @@
 // timeout: turning blanking off should not also lose the stale-frame recovery.
 #define ZD_HOST_ABSENT_AFTER_S_DEFAULT 600
 
-// Idle rotation. Slow enough not to catch the eye from across a room, quick
-// enough that no single composition sits on the panel for long.
-#define ZD_IDLE_ROTATE_S_DEFAULT 10
-// Brand and last-played on by default; the clock stays dark until a host sets
-// the time, so enabling it costs nothing when unused.
+// Which parts of the idle frame may appear. All three by default: the clock
+// stays dark until a host sets the time and last-played until something has
+// been launched, so enabling them costs nothing when unused.
 #define ZD_IDLE_SCREENS_DEFAULT 0x7
+
+// Idle column rhythm. Each gap is measured from the previous row's cap bottom
+// to the next row's cap top, and the group is then centred in the safe area, so
+// a device that knows less draws fewer rows without the column hanging from the
+// top of the panel. See ui/scenes.c.
+#define ZD_IDLE_GAP_STATUS 22
+#define ZD_IDLE_GAP_SECTION 34
+#define ZD_IDLE_GAP_TITLE 22
+#define ZD_IDLE_GAP_ROW 14
+
+// Narrowest the idle column is allowed to get. A device showing only a clock
+// and a status word would otherwise draw a rule barely wider than the word.
+#define ZD_IDLE_COLUMN_MIN_W 280
 
 // Brightness ramps. Long enough to read as deliberate, short enough that waking
 // the panel does not feel sluggish.

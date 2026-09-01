@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "ui/font.h"
@@ -10,9 +11,18 @@
 // zd_canvas_t draws a logical landscape UI onto a portrait panel framebuffer.
 //
 // The panel is physically portrait and the framebuffer is wider than the
-// visible area, so every write is rotated 90 degrees clockwise and offset by
+// visible area, so every write is rotated a quarter turn and offset by
 // overscan_left. Callers work purely in logical coordinates and never need to
 // know either detail.
+//
+// rotation turns the logical image, not the panel: 0 is the quarter turn
+// clockwise this panel has always used, and 180 composes a half turn on top of
+// it for a board mounted the other way up. Both land inside the same visible
+// window, so the overscan stays on the same physical edge either way.
+//
+// 90 and 270 are deliberately absent. They would leave the logical space
+// portrait rather than landscape, and every scene is written against 960x320;
+// that is a second UI, not a rotation.
 typedef struct {
     uint16_t *pixels;
     uint16_t active_width;
@@ -22,7 +32,27 @@ typedef struct {
     uint16_t logical_width;
     uint16_t logical_height;
     uint16_t overscan_left;
+    // Degrees, 0 or 180. Anything else is treated as 0.
+    uint16_t rotation;
 } zd_canvas_t;
+
+// A rectangle. Logical coordinates unless something says otherwise.
+typedef struct {
+    int x;
+    int y;
+    int width;
+    int height;
+} zd_rect_t;
+
+// Maps a logical rectangle onto the framebuffer, clipped to the visible area
+// and with the overscan already added. Returns false when none of it is
+// visible.
+//
+// This exists so the display layer can push one band instead of a whole frame.
+// A full frame on this panel costs around half a second: 400x960 drawn and then
+// copied again into the driver's own buffer, over a PSRAM bus the LCD DMA is
+// already reading flat out. Anything that repaints on a timer needs a window.
+bool zd_canvas_physical_rect(const zd_canvas_t *canvas, zd_rect_t logical, zd_rect_t *out_physical);
 
 // -- Pixels and rectangles --------------------------------------------------
 
@@ -85,8 +115,14 @@ void zd_canvas_blit_alpha_mask(zd_canvas_t *canvas, int x, int y, const uint8_t 
 
 // Segmented progress. Discrete cells rather than a continuous fill, whose right
 // edge would land on a fractional pixel.
-void zd_canvas_draw_progress_track(zd_canvas_t *canvas, int x, int y, int cells, int filled, int cell_width,
-                                   int cell_height, int gap, int radius, uint16_t on_color, uint16_t off_color);
+//
+// on_count cells starting at first_on take on_color and the rest take
+// off_color, which covers both forms the track has: a single lit cell walking
+// it says "working, length unknown", and a run from zero says how far along
+// something is. The overall width never changes with either.
+void zd_canvas_draw_progress_track(zd_canvas_t *canvas, int x, int y, int cells, int first_on, int on_count,
+                                   int cell_width, int cell_height, int gap, int radius, uint16_t on_color,
+                                   uint16_t off_color);
 
 // -- Baseline helpers -------------------------------------------------------
 
